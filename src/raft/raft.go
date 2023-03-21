@@ -18,13 +18,13 @@ package raft
 //
 
 import (
-	//	"bytes"
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -122,13 +122,15 @@ func (rf *Raft) applyLog() {
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -137,18 +139,17 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm, votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		return
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -208,6 +209,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.currentTerm = args.Term
 			rf.role = Follower
 			rf.votedFor = Null
+			go rf.persist()
 		}
 		lastLogIndex := len(rf.log) - 1
 		lastLogTerm := rf.log[lastLogIndex].Term
@@ -216,6 +218,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.votedFor = args.CandidateId
 			rf.heartbeated = true
 			reply.VoteGranted = true
+			go rf.persist()
 		} else {
 			reply.VoteGranted = false
 		}
@@ -235,6 +238,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 			rf.currentTerm = args.Term
 			rf.role = Follower
 			rf.votedFor = Null
+			go rf.persist()
 		}
 		if len(rf.log) <= args.PrevLogIndex {
 			reply.XTerm = -1
@@ -252,7 +256,18 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 			}
 			reply.XIndex = r
 		} else {
-			rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+			pos, length := args.PrevLogIndex+1, len(rf.log)
+			for i, v := range args.Entries {
+				if pos+i >= length {
+					rf.log = append(rf.log, args.Entries[i:]...)
+					go rf.persist()
+					break
+				} else if rf.log[pos+i].Term != v.Term {
+					rf.log = append(rf.log[:pos+i], args.Entries[i:]...)
+					go rf.persist()
+					break
+				}
+			}
 			if args.LeaderCommit > rf.commitIndex {
 				rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
 			}
@@ -316,6 +331,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	if isLeader {
 		rf.log = append(rf.log, LogEntry{Term: term, Command: command})
+		go rf.persist()
 		rf.nextIndex[rf.me]++
 		rf.matchIndex[rf.me]++
 		for i := 0; i < rf.peerCnt; i++ {
@@ -365,6 +381,7 @@ func (rf *Raft) ticker() {
 			rf.currentTerm++
 			rf.votedFor = rf.me
 			rf.voteCnt = 1
+			go rf.persist()
 			lastLogIndex := len(rf.log) - 1
 			lastLogTerm := rf.log[lastLogIndex].Term
 			args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogTerm: lastLogTerm, LastLogIndex: lastLogIndex}
@@ -387,6 +404,7 @@ func (rf *Raft) askVote(peer int, args *RequestVoteArgs) {
 			rf.currentTerm = reply.Term
 			rf.role = Follower
 			rf.votedFor = Null
+			go rf.persist()
 		}
 		if rf.role == Candidate && reply.VoteGranted && reply.Term == rf.currentTerm {
 			rf.voteCnt++
@@ -428,9 +446,10 @@ func (rf *Raft) sendSingleHeartbeat(peer int) {
 				rf.currentTerm = reply.Term
 				rf.role = Follower
 				rf.votedFor = Null
+				go rf.persist()
 			}
 		} else if reply.Success {
-			nextIndex := len(rf.log)
+			nextIndex := args.PrevLogIndex + 1 + len(args.Entries)
 			rf.nextIndex[peer] = nextIndex
 			rf.matchIndex[peer] = nextIndex - 1
 		} else if reply.XTerm == -1 {
@@ -459,8 +478,11 @@ func (rf *Raft) sendHeartbeat() {
 	for {
 		rf.mu.Lock()
 		if rf.role == Leader {
-			l, r := rf.commitIndex, len(rf.log)-1
-			var ans int
+			l, r := len(rf.log), len(rf.log)-1
+			for l > rf.commitIndex && rf.log[l-1].Term == rf.currentTerm {
+				l--
+			}
+			ans := rf.commitIndex
 			for l <= r {
 				mid := (l + r) >> 1
 				cnt := 0
