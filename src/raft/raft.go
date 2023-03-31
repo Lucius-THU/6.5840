@@ -82,6 +82,7 @@ type Raft struct {
 	lastApplied int
 	nextIndex   []int
 	matchIndex  []int
+	isCommiting bool
 
 	// Auxiliary variables
 	role        int
@@ -109,6 +110,10 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) applyLog() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if rf.isCommiting {
+		return
+	}
+	rf.isCommiting = true
 	if rf.lastApplied+1 < rf.logOffset {
 		rf.lastApplied = rf.logOffset - 1
 	}
@@ -119,6 +124,7 @@ func (rf *Raft) applyLog() {
 		rf.applyCh <- msg
 		rf.mu.Lock()
 	}
+	rf.isCommiting = false
 }
 
 // save Raft's persistent state to stable storage,
@@ -337,18 +343,23 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		if args.LastIncludedIndex >= rf.logOffset {
 			rf.lastTerm = args.LastIncludedTerm
 			rf.snapshot = args.Data
-			if args.LastIncludedIndex > rf.commitIndex {
-				rf.commitIndex = args.LastIncludedIndex
-			}
-			if len(rf.log)+rf.logOffset > args.LastIncludedIndex+1 {
-				rf.log = rf.log[args.LastIncludedIndex+1-rf.logOffset:]
+			if args.LastIncludedIndex > rf.lastApplied {
+				msg := ApplyMsg{CommandValid: false, SnapshotValid: true, Snapshot: rf.snapshot, SnapshotIndex: args.LastIncludedIndex, SnapshotTerm: rf.lastTerm}
+				if args.LastIncludedIndex > rf.commitIndex {
+					rf.commitIndex = args.LastIncludedIndex
+				}
+				rf.lastApplied = args.LastIncludedIndex
+				if len(rf.log)+rf.logOffset > args.LastIncludedIndex+1 {
+					rf.log = rf.log[args.LastIncludedIndex+1-rf.logOffset:]
+				} else {
+					rf.log = make([]LogEntry, 0)
+				}
+				rf.logOffset = args.LastIncludedIndex + 1
+				rf.mu.Unlock()
+				rf.applyCh <- msg
 			} else {
-				rf.log = make([]LogEntry, 0)
+				rf.mu.Unlock()
 			}
-			rf.logOffset = args.LastIncludedIndex + 1
-			msg := ApplyMsg{CommandValid: false, SnapshotValid: true, Snapshot: rf.snapshot, SnapshotIndex: args.LastIncludedIndex, SnapshotTerm: rf.lastTerm}
-			rf.mu.Unlock()
-			rf.applyCh <- msg
 			rf.persist()
 		} else {
 			rf.mu.Unlock()
@@ -567,6 +578,7 @@ func (rf *Raft) sendSingleHeartbeat(peer int) {
 			nextIndex := args.PrevLogIndex + 1 + len(args.Entries)
 			rf.nextIndex[peer] = nextIndex
 			rf.matchIndex[peer] = nextIndex - 1
+			go rf.updateCommitIdx()
 		} else if reply.XTerm == -1 {
 			rf.nextIndex[peer] = reply.XIndex
 		} else if args.PrevLogIndex < rf.logOffset {
@@ -591,34 +603,41 @@ func (rf *Raft) sendSingleHeartbeat(peer int) {
 	}
 }
 
+func (rf *Raft) updateCommitIdx() {
+	rf.mu.Lock()
+	if rf.role == Leader {
+		l, r := len(rf.log), len(rf.log)-1
+		for l+rf.logOffset > rf.commitIndex && l > 0 && rf.log[l-1].Term == rf.currentTerm {
+			l--
+		}
+		ans := rf.commitIndex
+		for l <= r {
+			mid := (l + r) >> 1
+			cnt := 0
+			for i := 0; i < rf.peerCnt; i++ {
+				if rf.matchIndex[i] >= mid+rf.logOffset {
+					cnt++
+				}
+			}
+			if cnt >= rf.halfCnt {
+				ans = mid + rf.logOffset
+				l = mid + 1
+			} else {
+				r = mid - 1
+			}
+		}
+		rf.commitIndex = ans
+		if rf.lastApplied < rf.commitIndex {
+			go rf.applyLog()
+		}
+	}
+	rf.mu.Unlock()
+}
+
 func (rf *Raft) sendHeartbeat() {
-	for {
+	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.role == Leader {
-			l, r := len(rf.log), len(rf.log)-1
-			for l+rf.logOffset > rf.commitIndex && l > 0 && rf.log[l-1].Term == rf.currentTerm {
-				l--
-			}
-			ans := rf.commitIndex
-			for l <= r {
-				mid := (l + r) >> 1
-				cnt := 0
-				for i := 0; i < rf.peerCnt; i++ {
-					if rf.matchIndex[i] >= mid+rf.logOffset {
-						cnt++
-					}
-				}
-				if cnt >= rf.halfCnt {
-					ans = mid + rf.logOffset
-					l = mid + 1
-				} else {
-					r = mid - 1
-				}
-			}
-			rf.commitIndex = ans
-			if rf.lastApplied < rf.commitIndex {
-				go rf.applyLog()
-			}
 			for i := 0; i < rf.peerCnt; i++ {
 				if i != rf.me {
 					go rf.sendSingleHeartbeat(i)
