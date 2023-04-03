@@ -98,23 +98,20 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 	ch := kv.getChannel(index)
-	defer kv.releaseChannel(index)
-	for i := 0; i < 30; i++ {
-		select {
-		case op := <-ch:
-			if op.Type == "Get" && op.Key == args.Key {
-				reply.Value = op.Value
-				reply.Err = OK
-				return
-			} else {
-				reply.Err = ErrWrongLeader
-				return
-			}
-		default:
-			time.Sleep(10 * time.Millisecond)
+	select {
+	case op := <-ch:
+		if op.Type == "Get" && op.Key == args.Key {
+			reply.Value = op.Value
+			reply.Err = OK
+		} else {
+			reply.Err = ErrWrongLeader
 		}
+	case <-time.After(300 * time.Millisecond):
+		reply.Err = ErrWrongLeader
 	}
-	reply.Err = ErrWrongLeader
+	go func() {
+		kv.releaseChannel(index)
+	}()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -136,22 +133,19 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	ch := kv.getChannel(index)
-	defer kv.releaseChannel(index)
-	for i := 0; i < 30; i++ {
-		select {
-		case op := <-ch:
-			if op.Type == args.Op && op.Key == args.Key && op.Value == args.Value {
-				reply.Err = OK
-				return
-			} else {
-				reply.Err = ErrWrongLeader
-				return
-			}
-		default:
-			time.Sleep(10 * time.Millisecond)
+	select {
+	case op := <-ch:
+		if op.Type == args.Op && op.Key == args.Key && op.Value == args.Value {
+			reply.Err = OK
+		} else {
+			reply.Err = ErrWrongLeader
 		}
+	case <-time.After(300 * time.Millisecond):
+		reply.Err = ErrWrongLeader
 	}
-	reply.Err = ErrWrongLeader
+	go func() {
+		kv.releaseChannel(index)
+	}()
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -195,13 +189,16 @@ func (kv *KVServer) applier() {
 			} else {
 				kv.answerMap[op.ClientId] = Answer{requestId: op.RequestId, value: kv.table[op.Key]}
 			}
-			if ch, ok := kv.chanMap[m.CommandIndex]; ok {
+			if term, isLeader := kv.rf.GetState(); isLeader && term == m.CommandTerm {
 				if !flag && op.Type == "Get" {
 					op.Value = kv.table[op.Key]
 				}
+				kv.mu.Unlock()
+				ch := kv.getChannel(m.CommandIndex)
 				ch <- op
+			} else {
+				kv.mu.Unlock()
 			}
-			kv.mu.Unlock()
 		}
 	}
 }

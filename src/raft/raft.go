@@ -41,6 +41,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 
 	// For 2D:
 	SnapshotValid bool
@@ -119,7 +120,7 @@ func (rf *Raft) applyLog() {
 	}
 	for rf.commitIndex > rf.lastApplied {
 		rf.lastApplied++
-		msg := ApplyMsg{CommandValid: true, Command: rf.log[rf.lastApplied-rf.logOffset].Command, CommandIndex: rf.lastApplied}
+		msg := ApplyMsg{CommandValid: true, Command: rf.log[rf.lastApplied-rf.logOffset].Command, CommandIndex: rf.lastApplied, CommandTerm: rf.log[rf.lastApplied-rf.logOffset].Term}
 		rf.mu.Unlock()
 		rf.applyCh <- msg
 		rf.mu.Lock()
@@ -182,7 +183,6 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	if index >= rf.logOffset {
 		if len(rf.log) > index-rf.logOffset {
 			rf.lastTerm = rf.log[index-rf.logOffset].Term
@@ -190,7 +190,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		rf.log = rf.log[index+1-rf.logOffset:]
 		rf.logOffset = index + 1
 		rf.snapshot = snapshot
-		go rf.persist()
+		rf.mu.Unlock()
+		rf.persist()
+	} else {
+		rf.mu.Unlock()
 	}
 }
 
@@ -307,11 +310,15 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 			for i, v := range args.Entries {
 				if pos+i >= length {
 					rf.log = append(rf.log, args.Entries[i:]...)
-					go rf.persist()
+					rf.mu.Unlock()
+					rf.persist()
+					rf.mu.Lock()
 					break
 				} else if pos+i >= 0 && rf.log[pos+i].Term != v.Term {
 					rf.log = append(rf.log[:pos+i], args.Entries[i:]...)
-					go rf.persist()
+					rf.mu.Unlock()
+					rf.persist()
+					rf.mu.Lock()
 					break
 				}
 			}
@@ -421,7 +428,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	if isLeader {
 		rf.log = append(rf.log, LogEntry{Term: term, Command: command})
-		go rf.persist()
+		rf.mu.Unlock()
+		rf.persist()
+		rf.mu.Lock()
 		rf.nextIndex[rf.me]++
 		rf.matchIndex[rf.me]++
 		for i := 0; i < rf.peerCnt; i++ {
