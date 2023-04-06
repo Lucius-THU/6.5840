@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -32,8 +33,8 @@ type Op struct {
 }
 
 type Answer struct {
-	requestId int
-	value     string
+	RequestId int
+	Value     string
 }
 
 type KVServer struct {
@@ -51,6 +52,7 @@ type KVServer struct {
 	chanPool  []chan Op
 	chanMap   map[int]chan Op
 	answerMap map[int64]Answer
+	appliedId int
 }
 
 func (kv *KVServer) getChannel(index int) chan Op {
@@ -85,8 +87,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 	kv.mu.Lock()
-	if answer, ok := kv.answerMap[args.ClientId]; ok && answer.requestId == args.RequestId {
-		reply.Value = answer.value
+	if answer, ok := kv.answerMap[args.ClientId]; ok && answer.RequestId == args.RequestId {
+		reply.Value = answer.Value
 		reply.Err = OK
 		kv.mu.Unlock()
 		return
@@ -121,7 +123,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	kv.mu.Lock()
-	if answer, ok := kv.answerMap[args.ClientId]; ok && answer.requestId == args.RequestId {
+	if answer, ok := kv.answerMap[args.ClientId]; ok && answer.RequestId == args.RequestId {
 		reply.Err = OK
 		kv.mu.Unlock()
 		return
@@ -172,23 +174,28 @@ func (kv *KVServer) applier() {
 		if kv.killed() {
 			return
 		}
+		kv.mu.Lock()
 		if m.CommandValid {
-			kv.mu.Lock()
+			if kv.appliedId >= m.CommandIndex {
+				kv.mu.Unlock()
+				continue
+			}
 			op := m.Command.(Op)
 			flag := false
-			if answer, ok := kv.answerMap[op.ClientId]; ok && answer.requestId == op.RequestId {
-				op.Value = answer.value
+			if answer, ok := kv.answerMap[op.ClientId]; ok && answer.RequestId == op.RequestId {
+				op.Value = answer.Value
 				flag = true
 			} else if op.Type != "Get" {
-				kv.answerMap[op.ClientId] = Answer{requestId: op.RequestId}
+				kv.answerMap[op.ClientId] = Answer{RequestId: op.RequestId}
 				if op.Type == "Put" {
 					kv.table[op.Key] = op.Value
 				} else {
 					kv.table[op.Key] += op.Value
 				}
 			} else {
-				kv.answerMap[op.ClientId] = Answer{requestId: op.RequestId, value: kv.table[op.Key]}
+				kv.answerMap[op.ClientId] = Answer{RequestId: op.RequestId, Value: kv.table[op.Key]}
 			}
+			kv.appliedId = m.CommandIndex
 			if term, isLeader := kv.rf.GetState(); isLeader && term == m.CommandTerm {
 				if !flag && op.Type == "Get" {
 					op.Value = kv.table[op.Key]
@@ -196,10 +203,36 @@ func (kv *KVServer) applier() {
 				kv.mu.Unlock()
 				ch := kv.getChannel(m.CommandIndex)
 				ch <- op
-			} else {
+				kv.mu.Lock()
+			}
+			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() > kv.maxraftstate {
+				w := new(bytes.Buffer)
+				e := labgob.NewEncoder(w)
+				e.Encode(kv.table)
+				e.Encode(kv.answerMap)
+				e.Encode(kv.appliedId)
+				snapshot := w.Bytes()
+				kv.rf.Snapshot(kv.appliedId, snapshot)
+			}
+		} else if m.SnapshotValid {
+			if kv.appliedId >= m.SnapshotIndex {
 				kv.mu.Unlock()
+				continue
+			}
+			r := bytes.NewBuffer(m.Snapshot)
+			d := labgob.NewDecoder(r)
+			var table map[string]string
+			var answerMap map[int64]Answer
+			var appliedId int
+			if d.Decode(&table) != nil || d.Decode(&answerMap) != nil || d.Decode(&appliedId) != nil {
+				log.Fatal("Decode error")
+			} else {
+				kv.table = table
+				kv.answerMap = answerMap
+				kv.appliedId = appliedId
 			}
 		}
+		kv.mu.Unlock()
 	}
 }
 
@@ -225,10 +258,26 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		persister:    persister,
 		applyCh:      make(chan raft.ApplyMsg),
 		maxraftstate: maxraftstate,
-		table:        make(map[string]string),
 		chanPool:     make([]chan Op, 1000),
 		chanMap:      make(map[int]chan Op),
-		answerMap:    make(map[int64]Answer),
+	}
+	snapshot := kv.persister.ReadSnapshot()
+	if len(snapshot) > 0 {
+		r := bytes.NewBuffer(snapshot)
+		d := labgob.NewDecoder(r)
+		var table map[string]string
+		var answerMap map[int64]Answer
+		var appliedId int
+		if d.Decode(&table) != nil || d.Decode(&answerMap) != nil || d.Decode(&appliedId) != nil {
+			log.Fatal("Decode error")
+		} else {
+			kv.table = table
+			kv.answerMap = answerMap
+			kv.appliedId = appliedId
+		}
+	} else {
+		kv.table = make(map[string]string)
+		kv.answerMap = make(map[int64]Answer)
 	}
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	for i := 0; i < 1000; i++ {
