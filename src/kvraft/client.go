@@ -24,9 +24,8 @@ func nrand() int64 {
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := &Clerk{
-		servers:   servers,
-		id:        nrand(),
-		requestId: 0,
+		servers: servers,
+		id:      nrand(),
 	}
 	// You'll have to add code here.
 	return ck

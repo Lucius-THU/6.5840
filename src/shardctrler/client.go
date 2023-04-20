@@ -29,10 +29,9 @@ func nrand() int64 {
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := &Clerk{
-		servers:   servers,
-		id:        nrand(),
-		requestId: 0,
-		cnt:       len(servers),
+		servers: servers,
+		id:      nrand(),
+		cnt:     len(servers),
 	}
 	// Your code here.
 	return ck
@@ -121,6 +120,28 @@ func (ck *Clerk) Move(shard int, gid int) {
 			if ok && !reply.WrongLeader {
 				ck.leaderId = i
 				return
+			}
+		}
+	}
+}
+
+func (ck *Clerk) Work() bool {
+	args := &WorkArgs{ClientId: ck.id, RequestId: ck.requestId}
+	// Your code here.
+	ck.requestId++
+	reply := WorkReply{}
+	ok := ck.servers[ck.leaderId].Call("ShardCtrler.Work", args, &reply)
+	if ok && !reply.WrongLeader {
+		return reply.Flag
+	}
+	for {
+		// try each known server.
+		for i := 0; i < ck.cnt; i++ {
+			reply := WorkReply{}
+			ok := ck.servers[i].Call("ShardCtrler.Work", args, &reply)
+			if ok && !reply.WrongLeader {
+				ck.leaderId = i
+				return reply.Flag
 			}
 		}
 	}

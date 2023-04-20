@@ -37,6 +37,7 @@ const (
 	Leave = "Leave"
 	Move  = "Move"
 	Query = "Query"
+	Work  = "Work"
 )
 
 type Err string
@@ -85,4 +86,15 @@ type QueryReply struct {
 	WrongLeader bool
 	Err         Err
 	Config      Config
+}
+
+type WorkArgs struct {
+	ClientId  int64
+	RequestId int
+}
+
+type WorkReply struct {
+	WrongLeader bool
+	Err         Err
+	Flag        bool
 }

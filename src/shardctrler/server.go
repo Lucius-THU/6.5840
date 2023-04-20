@@ -21,7 +21,8 @@ type ShardCtrler struct {
 	chanMap   map[int]chan Op
 	answerMap map[int64]Answer
 
-	configs []Config // indexed by config num
+	configs   []Config // indexed by config num
+	isWorking bool
 }
 
 type Op struct {
@@ -35,11 +36,13 @@ type Op struct {
 	Config    Config
 	ClientId  int64
 	RequestId int
+	Flag      bool
 }
 
 type Answer struct {
 	RequestId int
 	Config    Config
+	Flag      bool
 }
 
 func (sc *ShardCtrler) getChannel(index int) chan Op {
@@ -178,6 +181,36 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	}()
 }
 
+func (sc *ShardCtrler) Work(args *WorkArgs, reply *WorkReply) {
+	// Your code here.
+	sc.mu.Lock()
+	if answer, ok := sc.answerMap[args.ClientId]; ok && answer.RequestId == args.RequestId {
+		reply.Flag = answer.Flag
+		sc.mu.Unlock()
+		return
+	}
+	sc.mu.Unlock()
+	index, _, ok := sc.rf.Start(Op{Type: Work, ClientId: args.ClientId, RequestId: args.RequestId})
+	if !ok {
+		reply.WrongLeader = true
+		return
+	}
+	ch := sc.getChannel(index)
+	select {
+	case op := <-ch:
+		if op.Type != Work {
+			reply.WrongLeader = true
+		} else {
+			reply.Flag = op.Flag
+		}
+	case <-time.After(300 * time.Millisecond):
+		reply.WrongLeader = true
+	}
+	go func() {
+		sc.releaseChannel(index)
+	}()
+}
+
 // the tester calls Kill() when a ShardCtrler instance won't
 // be needed again. you are not required to do anything
 // in Kill(), but it might be convenient to (for example)
@@ -197,6 +230,7 @@ func (sc *ShardCtrler) rebalance() {
 	// sort to get deterministic order
 	if len(config.Groups) == 0 {
 		config.Shards = [NShards]int{}
+		sc.isWorking = false
 		return
 	}
 	var groups []int
@@ -240,6 +274,7 @@ func (sc *ShardCtrler) applier() {
 			flag := false
 			if answer, ok := sc.answerMap[op.ClientId]; ok && answer.RequestId == op.RequestId {
 				op.Config = answer.Config
+				op.Flag = answer.Flag
 				flag = true
 			} else if op.Type != Query {
 				sc.answerMap[op.ClientId] = Answer{RequestId: op.RequestId}
@@ -263,6 +298,13 @@ func (sc *ShardCtrler) applier() {
 					}
 					sc.configs = append(sc.configs, config)
 					sc.rebalance()
+				} else if op.Type == Work {
+					if !sc.isWorking {
+						sc.isWorking = true
+						sc.answerMap[op.ClientId] = Answer{RequestId: op.RequestId, Flag: true}
+					} else {
+						sc.answerMap[op.ClientId] = Answer{RequestId: op.RequestId, Flag: false}
+					}
 				} else {
 					config := sc.configs[len(sc.configs)-1]
 					config.Num++
@@ -277,8 +319,9 @@ func (sc *ShardCtrler) applier() {
 				sc.answerMap[op.ClientId] = Answer{RequestId: op.RequestId, Config: sc.configs[num]}
 			}
 			if term, isLeader := sc.rf.GetState(); isLeader && term == m.CommandTerm {
-				if !flag && op.Type == Query {
+				if !flag && (op.Type == Query || op.Type == Work) {
 					op.Config = sc.answerMap[op.ClientId].Config
+					op.Flag = sc.answerMap[op.ClientId].Flag
 				}
 				sc.mu.Unlock()
 				ch := sc.getChannel(m.CommandIndex)
