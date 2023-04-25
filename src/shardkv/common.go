@@ -22,7 +22,6 @@ const (
 	Stored  = 1
 	Serving = 2
 	Waiting = 3
-	Sending = 4
 )
 
 type Err string
@@ -60,6 +59,7 @@ type GetReply struct {
 
 type ShardMoveArgs struct {
 	Shard     int
+	Version   int
 	Table     map[string]string
 	AnswerMap map[int64]Answer
 }

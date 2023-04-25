@@ -91,10 +91,11 @@ type QueryReply struct {
 type WorkArgs struct {
 	ClientId  int64
 	RequestId int
+	Gid       int
 }
 
 type WorkReply struct {
 	WrongLeader bool
 	Err         Err
-	Flag        bool
+	Gid         int
 }

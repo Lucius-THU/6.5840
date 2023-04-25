@@ -49,35 +49,17 @@ type KVServer struct {
 
 	// Your definitions here.
 	table     map[string]string
-	chanPool  []chan Op
 	chanMap   map[int]chan Op
 	answerMap map[int64]Answer
 	appliedId int
 }
 
 func (kv *KVServer) getChannel(index int) chan Op {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	if ch, ok := kv.chanMap[index]; ok {
 		return ch
 	}
-	for len(kv.chanPool) == 0 {
-		kv.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-		kv.mu.Lock()
-	}
-	ch := kv.chanPool[0]
-	kv.chanMap[index] = ch
-	kv.chanPool = kv.chanPool[1:]
-	return ch
-}
-
-func (kv *KVServer) releaseChannel(index int) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	ch := kv.chanMap[index]
-	kv.chanPool = append(kv.chanPool, ch)
-	delete(kv.chanMap, index)
+	kv.chanMap[index] = make(chan Op, 1)
+	return kv.chanMap[index]
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -93,13 +75,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Unlock()
 		return
 	}
-	kv.mu.Unlock()
 	index, _, ok := kv.rf.Start(Op{Type: "Get", Key: args.Key, ClientId: args.ClientId, RequestId: args.RequestId})
 	if !ok {
 		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
 		return
 	}
 	ch := kv.getChannel(index)
+	kv.mu.Unlock()
 	select {
 	case op := <-ch:
 		if op.Type == "Get" && op.Key == args.Key {
@@ -111,9 +94,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	case <-time.After(300 * time.Millisecond):
 		reply.Err = ErrWrongLeader
 	}
-	go func() {
-		kv.releaseChannel(index)
-	}()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -128,13 +108,14 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Unlock()
 		return
 	}
-	kv.mu.Unlock()
 	index, _, ok := kv.rf.Start(Op{Type: args.Op, Key: args.Key, Value: args.Value, ClientId: args.ClientId, RequestId: args.RequestId})
 	if !ok {
 		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
 		return
 	}
 	ch := kv.getChannel(index)
+	kv.mu.Unlock()
 	select {
 	case op := <-ch:
 		if op.Type == args.Op && op.Key == args.Key && op.Value == args.Value {
@@ -145,9 +126,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	case <-time.After(300 * time.Millisecond):
 		reply.Err = ErrWrongLeader
 	}
-	go func() {
-		kv.releaseChannel(index)
-	}()
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -200,10 +178,12 @@ func (kv *KVServer) applier() {
 				if !flag && op.Type == "Get" {
 					op.Value = kv.table[op.Key]
 				}
-				kv.mu.Unlock()
-				ch := kv.getChannel(m.CommandIndex)
-				ch <- op
-				kv.mu.Lock()
+				if ch, ok := kv.chanMap[m.CommandIndex]; ok {
+					kv.mu.Unlock()
+					ch <- op
+					kv.mu.Lock()
+					delete(kv.chanMap, m.CommandIndex)
+				}
 			}
 			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() > kv.maxraftstate {
 				w := new(bytes.Buffer)
@@ -258,7 +238,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		persister:    persister,
 		applyCh:      make(chan raft.ApplyMsg),
 		maxraftstate: maxraftstate,
-		chanPool:     make([]chan Op, 1000),
 		chanMap:      make(map[int]chan Op),
 	}
 	snapshot := kv.persister.ReadSnapshot()
@@ -280,9 +259,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		kv.answerMap = make(map[int64]Answer)
 	}
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	for i := 0; i < 1000; i++ {
-		kv.chanPool[i] = make(chan Op)
-	}
 	go kv.applier()
 	// You may need initialization code here.
 

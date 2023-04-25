@@ -17,12 +17,11 @@ type ShardCtrler struct {
 	applyCh chan raft.ApplyMsg
 
 	// Your data here.
-	chanPool  []chan Op
 	chanMap   map[int]chan Op
 	answerMap map[int64]Answer
 
-	configs   []Config // indexed by config num
-	isWorking bool
+	configs  []Config // indexed by config num
+	firstGid int
 }
 
 type Op struct {
@@ -36,38 +35,20 @@ type Op struct {
 	Config    Config
 	ClientId  int64
 	RequestId int
-	Flag      bool
 }
 
 type Answer struct {
 	RequestId int
 	Config    Config
-	Flag      bool
+	Gid       int
 }
 
 func (sc *ShardCtrler) getChannel(index int) chan Op {
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
 	if ch, ok := sc.chanMap[index]; ok {
 		return ch
 	}
-	for len(sc.chanPool) == 0 {
-		sc.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-		sc.mu.Lock()
-	}
-	ch := sc.chanPool[0]
-	sc.chanMap[index] = ch
-	sc.chanPool = sc.chanPool[1:]
-	return ch
-}
-
-func (sc *ShardCtrler) releaseChannel(index int) {
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
-	ch := sc.chanMap[index]
-	sc.chanPool = append(sc.chanPool, ch)
-	delete(sc.chanMap, index)
+	sc.chanMap[index] = make(chan Op, 1)
+	return sc.chanMap[index]
 }
 
 func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
@@ -77,13 +58,14 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 		sc.mu.Unlock()
 		return
 	}
-	sc.mu.Unlock()
 	index, _, ok := sc.rf.Start(Op{Type: Join, Servers: args.Servers, ClientId: args.ClientId, RequestId: args.RequestId})
 	if !ok {
 		reply.WrongLeader = true
+		sc.mu.Unlock()
 		return
 	}
 	ch := sc.getChannel(index)
+	sc.mu.Unlock()
 	select {
 	case op := <-ch:
 		if op.Type != Join {
@@ -92,9 +74,6 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	case <-time.After(300 * time.Millisecond):
 		reply.WrongLeader = true
 	}
-	go func() {
-		sc.releaseChannel(index)
-	}()
 }
 
 func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
@@ -104,13 +83,14 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 		sc.mu.Unlock()
 		return
 	}
-	sc.mu.Unlock()
 	index, _, ok := sc.rf.Start(Op{Type: Leave, GIDs: args.GIDs, ClientId: args.ClientId, RequestId: args.RequestId})
 	if !ok {
 		reply.WrongLeader = true
+		sc.mu.Unlock()
 		return
 	}
 	ch := sc.getChannel(index)
+	sc.mu.Unlock()
 	select {
 	case op := <-ch:
 		if op.Type != Leave {
@@ -119,9 +99,6 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	case <-time.After(300 * time.Millisecond):
 		reply.WrongLeader = true
 	}
-	go func() {
-		sc.releaseChannel(index)
-	}()
 }
 
 func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
@@ -131,13 +108,14 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 		sc.mu.Unlock()
 		return
 	}
-	sc.mu.Unlock()
 	index, _, ok := sc.rf.Start(Op{Type: Move, GID: args.GID, Shard: args.Shard, ClientId: args.ClientId, RequestId: args.RequestId})
 	if !ok {
 		reply.WrongLeader = true
+		sc.mu.Unlock()
 		return
 	}
 	ch := sc.getChannel(index)
+	sc.mu.Unlock()
 	select {
 	case op := <-ch:
 		if op.Type != Move && op.GID != args.GID && op.Shard != args.Shard {
@@ -146,9 +124,6 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 	case <-time.After(300 * time.Millisecond):
 		reply.WrongLeader = true
 	}
-	go func() {
-		sc.releaseChannel(index)
-	}()
 }
 
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
@@ -159,13 +134,14 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 		sc.mu.Unlock()
 		return
 	}
-	sc.mu.Unlock()
 	index, _, ok := sc.rf.Start(Op{Type: Query, Num: args.Num, ClientId: args.ClientId, RequestId: args.RequestId})
 	if !ok {
 		reply.WrongLeader = true
+		sc.mu.Unlock()
 		return
 	}
 	ch := sc.getChannel(index)
+	sc.mu.Unlock()
 	select {
 	case op := <-ch:
 		if op.Type != Query {
@@ -176,39 +152,34 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	case <-time.After(300 * time.Millisecond):
 		reply.WrongLeader = true
 	}
-	go func() {
-		sc.releaseChannel(index)
-	}()
 }
 
 func (sc *ShardCtrler) Work(args *WorkArgs, reply *WorkReply) {
 	// Your code here.
 	sc.mu.Lock()
 	if answer, ok := sc.answerMap[args.ClientId]; ok && answer.RequestId == args.RequestId {
-		reply.Flag = answer.Flag
+		reply.Gid = answer.Gid
 		sc.mu.Unlock()
 		return
 	}
-	sc.mu.Unlock()
-	index, _, ok := sc.rf.Start(Op{Type: Work, ClientId: args.ClientId, RequestId: args.RequestId})
+	index, _, ok := sc.rf.Start(Op{Type: Work, ClientId: args.ClientId, RequestId: args.RequestId, GID: args.Gid})
 	if !ok {
 		reply.WrongLeader = true
+		sc.mu.Unlock()
 		return
 	}
 	ch := sc.getChannel(index)
+	sc.mu.Unlock()
 	select {
 	case op := <-ch:
 		if op.Type != Work {
 			reply.WrongLeader = true
 		} else {
-			reply.Flag = op.Flag
+			reply.Gid = op.GID
 		}
 	case <-time.After(300 * time.Millisecond):
 		reply.WrongLeader = true
 	}
-	go func() {
-		sc.releaseChannel(index)
-	}()
 }
 
 // the tester calls Kill() when a ShardCtrler instance won't
@@ -230,7 +201,7 @@ func (sc *ShardCtrler) rebalance() {
 	// sort to get deterministic order
 	if len(config.Groups) == 0 {
 		config.Shards = [NShards]int{}
-		sc.isWorking = false
+		sc.firstGid = -1
 		return
 	}
 	var groups []int
@@ -274,7 +245,7 @@ func (sc *ShardCtrler) applier() {
 			flag := false
 			if answer, ok := sc.answerMap[op.ClientId]; ok && answer.RequestId == op.RequestId {
 				op.Config = answer.Config
-				op.Flag = answer.Flag
+				op.GID = answer.Gid
 				flag = true
 			} else if op.Type != Query {
 				sc.answerMap[op.ClientId] = Answer{RequestId: op.RequestId}
@@ -299,12 +270,10 @@ func (sc *ShardCtrler) applier() {
 					sc.configs = append(sc.configs, config)
 					sc.rebalance()
 				} else if op.Type == Work {
-					if !sc.isWorking {
-						sc.isWorking = true
-						sc.answerMap[op.ClientId] = Answer{RequestId: op.RequestId, Flag: true}
-					} else {
-						sc.answerMap[op.ClientId] = Answer{RequestId: op.RequestId, Flag: false}
+					if sc.firstGid == -1 {
+						sc.firstGid = op.GID
 					}
+					sc.answerMap[op.ClientId] = Answer{RequestId: op.RequestId, Gid: sc.firstGid}
 				} else {
 					config := sc.configs[len(sc.configs)-1]
 					config.Num++
@@ -321,12 +290,14 @@ func (sc *ShardCtrler) applier() {
 			if term, isLeader := sc.rf.GetState(); isLeader && term == m.CommandTerm {
 				if !flag && (op.Type == Query || op.Type == Work) {
 					op.Config = sc.answerMap[op.ClientId].Config
-					op.Flag = sc.answerMap[op.ClientId].Flag
+					op.GID = sc.answerMap[op.ClientId].Gid
 				}
-				sc.mu.Unlock()
-				ch := sc.getChannel(m.CommandIndex)
-				ch <- op
-				sc.mu.Lock()
+				if ch, ok := sc.chanMap[m.CommandIndex]; ok {
+					sc.mu.Unlock()
+					ch <- op
+					sc.mu.Lock()
+					delete(sc.chanMap, m.CommandIndex)
+				}
 			}
 			sc.mu.Unlock()
 		}
@@ -342,16 +313,13 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 		me:        me,
 		configs:   []Config{{}},
 		applyCh:   make(chan raft.ApplyMsg),
-		chanPool:  make([]chan Op, 1000),
 		chanMap:   make(map[int]chan Op),
 		answerMap: make(map[int64]Answer),
+		firstGid:  -1,
 	}
 
 	labgob.Register(Op{})
 	sc.rf = raft.Make(servers, me, persister, sc.applyCh)
-	for i := 0; i < 1000; i++ {
-		sc.chanPool[i] = make(chan Op)
-	}
 
 	// Your code here.
 	go sc.applier()

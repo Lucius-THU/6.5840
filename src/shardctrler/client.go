@@ -125,14 +125,14 @@ func (ck *Clerk) Move(shard int, gid int) {
 	}
 }
 
-func (ck *Clerk) Work() bool {
-	args := &WorkArgs{ClientId: ck.id, RequestId: ck.requestId}
+func (ck *Clerk) Work(gid int) int {
+	args := &WorkArgs{ClientId: ck.id, RequestId: ck.requestId, Gid: gid}
 	// Your code here.
 	ck.requestId++
 	reply := WorkReply{}
 	ok := ck.servers[ck.leaderId].Call("ShardCtrler.Work", args, &reply)
 	if ok && !reply.WrongLeader {
-		return reply.Flag
+		return reply.Gid
 	}
 	for {
 		// try each known server.
@@ -141,7 +141,7 @@ func (ck *Clerk) Work() bool {
 			ok := ck.servers[i].Call("ShardCtrler.Work", args, &reply)
 			if ok && !reply.WrongLeader {
 				ck.leaderId = i
-				return reply.Flag
+				return reply.Gid
 			}
 		}
 	}

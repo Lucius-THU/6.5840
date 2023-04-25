@@ -80,6 +80,13 @@ func (ck *Clerk) Get(key string) string {
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+					/*
+						le := 5
+						if le > len(reply.Value) {
+							le = len(reply.Value)
+						}
+						fmt.Println("Get: ", key, "on shard", shard, "of", gid, reply.Value[0:le])
+					*/
 					return reply.Value
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
