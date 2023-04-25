@@ -130,7 +130,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		} else {
 			reply.Err = ErrWrongGroup
 		}
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		reply.Err = ErrWrongLeader
 	}
 }
@@ -163,7 +163,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		} else {
 			reply.Err = ErrWrongGroup
 		}
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		reply.Err = ErrWrongLeader
 	}
 }
@@ -248,7 +248,7 @@ func (kv *ShardKV) ShardMove(args *ShardMoveArgs, reply *ShardMoveReply) {
 	select {
 	case ans := <-ch:
 		reply.Err = ans.Err
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		reply.Err = ErrWrongLeader
 	}
 }
@@ -348,21 +348,15 @@ func (kv *ShardKV) applier() {
 }
 
 func (kv *ShardKV) configer() {
-	isFirst := true
+	kv.mu.Lock()
+	gid := kv.gid
+	flag := kv.mck.Work(gid) == gid
+	kv.mu.Unlock()
 	for {
 		if _, isLeader := kv.rf.GetState(); isLeader {
 			config := kv.mck.Query(-1)
 
-			flag := false
 			kv.mu.Lock()
-			gid := kv.gid
-			if isFirst {
-				kv.mu.Unlock()
-				flag = kv.mck.Work(gid) == gid
-				kv.mu.Lock()
-			}
-			isFirst = true
-
 			for i := 0; i < shardctrler.NShards; i++ {
 				f := flag && kv.shards[i].SeqNum == 0
 				if kv.shards[i].State == Serving && config.Shards[i] != kv.gid {
@@ -394,13 +388,10 @@ func (kv *ShardKV) configer() {
 						kv.rf.Start(Op{Type: "State", Shard: i, State: Stored, Group: group, SeqNum: kv.shards[i].SeqNum})
 					}
 				}
-				if config.Shards[i] == kv.gid {
-					isFirst = false
-				}
 			}
 			kv.mu.Unlock()
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(60 * time.Millisecond)
 	}
 }
 

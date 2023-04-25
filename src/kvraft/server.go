@@ -91,7 +91,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		} else {
 			reply.Err = ErrWrongLeader
 		}
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		reply.Err = ErrWrongLeader
 	}
 }
@@ -123,7 +123,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		} else {
 			reply.Err = ErrWrongLeader
 		}
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		reply.Err = ErrWrongLeader
 	}
 }

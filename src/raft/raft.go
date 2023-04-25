@@ -139,8 +139,6 @@ func (rf *Raft) persist() {
 	// Your code here (2C).
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
@@ -190,11 +188,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		rf.log = rf.log[index+1-rf.logOffset:]
 		rf.logOffset = index + 1
 		rf.snapshot = snapshot
-		rf.mu.Unlock()
 		rf.persist()
-	} else {
-		rf.mu.Unlock()
 	}
+	rf.mu.Unlock()
 }
 
 // example RequestVote RPC arguments structure.
@@ -255,7 +251,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.currentTerm = args.Term
 			rf.role = Follower
 			rf.votedFor = Null
-			go rf.persist()
+			rf.persist()
 		}
 		lastLogIndex := len(rf.log) - 1
 		lastLogTerm := rf.lastTerm
@@ -268,7 +264,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.votedFor = args.CandidateId
 			rf.heartbeated = true
 			reply.VoteGranted = true
-			go rf.persist()
+			rf.persist()
 		} else {
 			reply.VoteGranted = false
 		}
@@ -288,7 +284,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 			rf.currentTerm = args.Term
 			rf.role = Follower
 			rf.votedFor = Null
-			go rf.persist()
+			rf.persist()
 		}
 		if len(rf.log)+rf.logOffset <= args.PrevLogIndex {
 			reply.XTerm = -1
@@ -310,15 +306,11 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 			for i, v := range args.Entries {
 				if pos+i >= length {
 					rf.log = append(rf.log, args.Entries[i:]...)
-					rf.mu.Unlock()
 					rf.persist()
-					rf.mu.Lock()
 					break
 				} else if pos+i >= 0 && rf.log[pos+i].Term != v.Term {
 					rf.log = append(rf.log[:pos+i], args.Entries[i:]...)
-					rf.mu.Unlock()
 					rf.persist()
-					rf.mu.Lock()
 					break
 				}
 			}
@@ -345,7 +337,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 			rf.currentTerm = args.Term
 			rf.role = Follower
 			rf.votedFor = Null
-			go rf.persist()
+			rf.persist()
 		}
 		if args.LastIncludedIndex >= rf.logOffset {
 			rf.lastTerm = args.LastIncludedTerm
@@ -362,12 +354,13 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 					rf.log = make([]LogEntry, 0)
 				}
 				rf.logOffset = args.LastIncludedIndex + 1
+				rf.persist()
 				rf.mu.Unlock()
 				rf.applyCh <- msg
 			} else {
+				rf.persist()
 				rf.mu.Unlock()
 			}
-			rf.persist()
 		} else {
 			rf.mu.Unlock()
 		}
@@ -428,9 +421,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	if isLeader {
 		rf.log = append(rf.log, LogEntry{Term: term, Command: command})
-		rf.mu.Unlock()
 		rf.persist()
-		rf.mu.Lock()
 		rf.nextIndex[rf.me]++
 		rf.matchIndex[rf.me]++
 		for i := 0; i < rf.peerCnt; i++ {
@@ -479,7 +470,7 @@ func (rf *Raft) ticker() {
 			rf.currentTerm++
 			rf.votedFor = rf.me
 			rf.voteCnt = 1
-			go rf.persist()
+			rf.persist()
 			lastLogIndex := len(rf.log) - 1
 			lastLogTerm := rf.lastTerm
 			if lastLogIndex >= 0 {
@@ -506,7 +497,7 @@ func (rf *Raft) askVote(peer int, args *RequestVoteArgs) {
 			rf.currentTerm = reply.Term
 			rf.role = Follower
 			rf.votedFor = Null
-			go rf.persist()
+			rf.persist()
 		}
 		if rf.role == Candidate && reply.VoteGranted && reply.Term == rf.currentTerm {
 			rf.voteCnt++
@@ -541,7 +532,7 @@ func (rf *Raft) sendInstallSnapshot(peer int) {
 			rf.currentTerm = reply.Term
 			rf.role = Follower
 			rf.votedFor = Null
-			go rf.persist()
+			rf.persist()
 		} else {
 			rf.nextIndex[peer] = args.LastIncludedIndex + 1
 			rf.matchIndex[peer] = args.LastIncludedIndex
@@ -581,7 +572,7 @@ func (rf *Raft) sendSingleHeartbeat(peer int) {
 				rf.currentTerm = reply.Term
 				rf.role = Follower
 				rf.votedFor = Null
-				go rf.persist()
+				rf.persist()
 			}
 		} else if reply.Success {
 			nextIndex := args.PrevLogIndex + 1 + len(args.Entries)
@@ -657,7 +648,7 @@ func (rf *Raft) sendHeartbeat() {
 			rf.mu.Unlock()
 			break
 		}
-		time.Sleep(time.Duration(100) * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

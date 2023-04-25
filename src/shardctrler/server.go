@@ -71,7 +71,7 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 		if op.Type != Join {
 			reply.WrongLeader = true
 		}
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		reply.WrongLeader = true
 	}
 }
@@ -96,7 +96,7 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 		if op.Type != Leave {
 			reply.WrongLeader = true
 		}
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		reply.WrongLeader = true
 	}
 }
@@ -121,7 +121,7 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 		if op.Type != Move && op.GID != args.GID && op.Shard != args.Shard {
 			reply.WrongLeader = true
 		}
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		reply.WrongLeader = true
 	}
 }
@@ -149,7 +149,7 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 		} else {
 			reply.Config = op.Config
 		}
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		reply.WrongLeader = true
 	}
 }
@@ -177,7 +177,7 @@ func (sc *ShardCtrler) Work(args *WorkArgs, reply *WorkReply) {
 		} else {
 			reply.Gid = op.GID
 		}
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		reply.WrongLeader = true
 	}
 }
